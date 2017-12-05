@@ -26,7 +26,7 @@ from sklearn.utils.validation import check_array, check_consistent_length, check
 from sklearn.ensemble.forest import ForestRegressor, _parallel_build_trees
 from scipy.sparse import issparse
 from contextlib import closing
-from multiprocessing import Pool
+from multiprocessing import Pool, cpu_count
 
 from .metrics import *
 from .core.solver import compute_optimal_costs
@@ -404,10 +404,6 @@ END
         return check_is_fitted(self, ["tree_", "rule_importances_"])
 
 
-def build_interval_tree(args):
-    X, y, kwargs = args
-    return MaxMarginIntervalTree(**kwargs).fit(X, y)
-
 class RandomForestIntervalRegressor(ForestRegressor):
 
 
@@ -556,6 +552,26 @@ class RandomForestIntervalRegressor(ForestRegressor):
             #trees = trees.get()
             print("All done!")
 
+            """
+
+            # Parallel loop: we use the threading backend as the Cython code
+            # for fitting the trees is internally releasing the Python GIL
+            # making threading always more efficient than multiprocessing in
+            # that case.
+            trees = []
+            for i in range(n_more_estimators):
+                tree = self._make_estimator(append=False,
+                                            random_state=random_state)
+                trees.append(tree)
+            trees = Parallel(n_jobs=self.n_jobs, verbose=self.verbose,
+                             backend="threading")(
+                delayed(_parallel_build_trees)(
+                    t, self, X, y, sample_weight, i, len(trees),
+                    verbose=self.verbose, class_weight=self.class_weight)
+                for i, t in enumerate(trees))
+            """
+
+
             # Collect newly grown trees
             self.estimators_.extend(trees)
 
@@ -568,3 +584,110 @@ class RandomForestIntervalRegressor(ForestRegressor):
             self.classes_ = self.classes_[0]
 
         return self
+
+
+def build_interval_tree(args):
+    X, y, kwargs = args
+    tree_id = kwargs['random_state']
+    #print("Init Tree    %s" % tree_id)
+    tree = MaxMarginIntervalTree(**kwargs)
+    #print("Fitting Tree %s" % tree_id)
+    tree.fit(X, y)
+    #print("Done Tree    %s" % tree_id)
+    return tree
+
+
+class RandomMaximumMarginIntervalForest:
+
+    def __init__(self,
+                 n_estimators=25,
+                 n_processes=1,
+                 margin=0.0,
+                 loss="linear_hinge",
+                 max_depth=np.infty,
+                 min_samples_split=0,
+                 max_features=None,
+                 random_state=None):
+        """
+        Max margin interval tree
+
+        Parameters
+        ----------
+        n_estimators: int, default: 25
+            Number of trees to grow
+        n_processes: int, default: 1
+            Number of processes to use when building trees. 1 doesnt use
+            multiprocessing.
+        margin: float, default: 0
+            The margin on each side of the predicted value
+        loss: string, default="linear"
+            The loss function to use (linear_hinge, squared_hinge)
+        max_depth: int, default: infinity
+            The maximum depth of the tree
+        min_samples_split: int, default: 0
+            The minimum number of examples required to split a node
+        max_features: None or int or float, default: None
+            The maximum number of features to consider at every node split
+            (same procedure as in scikit learn)
+        random_state: int, RandomState instance or None, optional (default=None)
+            If int, random_state is the seed used by the random number generator; If RandomState instance, random_state
+            is the random number generator; If None, the random number generator is the RandomState instance used by
+            np.random. The random state is used for tiebreaking in the recursive partitioning.
+
+        """
+        self.n_estimators = n_estimators
+        self.n_processes = n_processes
+        self.margin = margin
+        self.loss = loss
+        self.max_depth = max_depth
+        self.min_samples_split = min_samples_split
+        self.max_features = max_features
+        self.random_state = random_state
+
+
+    def fit(self, X, y):
+        self.estimators = []
+        base_kwargs = \
+            tree_kwargs = {'margin': self.margin,
+                           'loss': self.loss,
+                           'max_depth': self.max_depth,
+                           'min_samples_split': self.min_samples_split,
+                           'max_features': self.max_features}
+
+        # Copying and setting a fixed random randomstate
+        tree_kwargs = []
+        for i in range(self.n_estimators):
+            tree_kwargs.append(base_kwargs.copy())
+            random_state = self.random_state + i if self.random_state is not None else None
+            tree_kwargs[-1]['random_state'] = random_state
+
+        if self.n_processes==1:
+            # build the trees sequentially
+            for i in range(self.n_estimators):
+                tree = build_interval_tree((X, y, tree_kwargs[i]))
+                self.estimators.append(tree)
+
+        else:
+            n_proc = min(self.n_processes, cpu_count)
+            print(n_proc)
+            iterable = [(X, y, tree_kwargs[i]) for i in range(50)]
+            with closing(Pool(n_proc)) as pool:
+                trees = pool.map(build_interval_tree, iterable)
+            self.estimators.extend(trees)
+
+        return self
+
+    def predict(self, X):
+
+        # TODO multiprocess
+        if X.ndim == 2:
+            predicted = np.zeros(len(X))
+        if X.ndim == 1:
+            predicted = 0
+
+        for tree in self.estimators:
+            predicted += tree.predict(X)
+
+        predicted = predicted / len(self.estimators)
+
+        return predicted
