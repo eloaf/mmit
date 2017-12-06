@@ -666,10 +666,11 @@ class RandomMaximumMarginIntervalForest:
             for i in range(self.n_estimators):
                 tree = build_interval_tree((X, y, tree_kwargs[i]))
                 self.estimators.append(tree)
-
         else:
-            n_proc = min(self.n_processes, cpu_count)
-            print(n_proc)
+            if self.n_processes < 0:
+                n_proc = cpu_count()
+            else:
+                n_proc = min(self.n_processes, cpu_count())
             iterable = [(X, y, tree_kwargs[i]) for i in range(50)]
             with closing(Pool(n_proc)) as pool:
                 trees = pool.map(build_interval_tree, iterable)
