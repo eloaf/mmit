@@ -691,3 +691,20 @@ class RandomMaximumMarginIntervalForest:
         predicted = predicted / len(self.estimators)
 
         return predicted
+
+    def get_params(self, deep=False):
+        return { \
+            "n_estimators": self.n_estimators,
+            "n_processes": self.n_processes,
+            "margin": self.margin,
+            "loss": self.loss,
+            "max_depth": self.max_depth,
+            "min_samples_split": self.min_samples_split,
+            "max_features": self.max_features,
+            "random_state": self.random_state,
+            }
+
+    def set_params(self, **kwargs):
+        for key, value in iteritems(kwargs):
+            setattr(self, key, value)
+        return self
